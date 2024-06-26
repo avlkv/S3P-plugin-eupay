@@ -7,6 +7,8 @@ import logging
 import time
 import dateparser
 from datetime import datetime, date
+
+from selenium.common import NoSuchElementException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.webdriver import WebDriver
 from src.spp.types import SPP_document
@@ -14,7 +16,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 
-class EUPAY:
+class EUPay:
     """
     Класс парсера плагина SPP
 
@@ -30,9 +32,8 @@ class EUPAY:
     _content_document: list[SPP_document]
     HOST = 'https://www.europeanpaymentscouncil.eu/search'
 
-    def __init__(self, webdriver: WebDriver, source_type: str, last_document: SPP_document = None,
-                 max_count_documents: int = 100,
-                 *args, **kwargs):
+    def __init__(self, webdriver: WebDriver, last_document: SPP_document = None,
+                 max_count_documents: int = 100):
         """
         Конструктор класса парсера
 
@@ -55,10 +56,6 @@ class EUPAY:
         self.wait = WebDriverWait(self.driver, timeout=20)
         self.max_count_documents = max_count_documents
         self.last_document = last_document
-        if source_type:
-            self.SOURCE_TYPE = source_type
-        else:
-            raise ValueError('source_type must be a type of source: "FILE" or "NATIVE"')
 
         # Логер должен подключаться так. Вся настройка лежит на платформе
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -90,62 +87,9 @@ class EUPAY:
         # HOST - это главная ссылка на источник, по которому будет "бегать" парсер
         self.logger.debug(F"Parser enter to {self.HOST}")
 
-        for page in self._encounter_pages():
-            self.driver.get(page)
-            time.sleep(1)
-
-            try:
-                all_cookies_btn = self.driver.find_element(By.XPATH, '//button[text() = \'Accept All Cookies\']')
-                all_cookies_btn.click()
-            except:
-                pass
-
-            doc_rows = self.driver.find_elements(By.CLASS_NAME, 'views-row')
-            for doc_row in doc_rows:
-
-                try:
-                    title = doc_row.find_element(By.CLASS_NAME, 'kb-title')
-                except:
-                    title = doc_row.find_element(By.CLASS_NAME, 'well').find_element(By.TAG_NAME, 'h2')
-                finally:
-                    title_text = title.text
-
-                web_link = title.find_element(By.TAG_NAME, 'a').get_attribute('href')
-
-                if len(doc_row.find_elements(By.CLASS_NAME, 'kb-type')) > 0:
-                    doc_type = doc_row.find_element(By.CLASS_NAME, 'kb-type').text
-                elif len(doc_row.find_elements(By.CLASS_NAME, 'news-type')) > 0:
-                    doc_type = doc_row.find_element(By.CLASS_NAME, 'news-type').text
-                elif len(doc_row.find_elements(By.CLASS_NAME, 'label-alt')) > 0:
-                    doc_type = doc_row.find_element(By.CLASS_NAME, 'label-alt').text
-                else:
-                    doc_type = ''
-
-                if len(doc_row.find_elements(By.CLASS_NAME, 'kb-intro')) > 0:
-                    date_text = doc_row.find_element(By.CLASS_NAME, 'kb-intro').find_element(By.CLASS_NAME, 'date').text
-                elif len(doc_row.find_elements(By.CLASS_NAME, 'field--created')) > 0:
-                    date_text = doc_row.find_element(By.CLASS_NAME, 'field--created').text
-                else:
-                    date_text = datetime.strftime(date(2000, 1, 1), format='%Y-%m-%d')
-
-                parsed_date = dateparser.parse(date_text)
-                date_str = datetime.strftime(parsed_date, format='%Y-%m-%d %H:%M:%S')
-
-                try:
-                    tags = doc_row.find_element(By.CLASS_NAME, 'kb-tags').text
-                except:
-                    tags = ''
-
-                self.driver.execute_script("window.open('');")
-                self.driver.switch_to.window(self.driver.window_handles[1])
-                self.driver.get(web_link)
-
-                try:
-                    all_cookies_btn = self.driver.find_element(By.XPATH, '//button[text() = \'Accept All Cookies\']')
-                    all_cookies_btn.click()
-                except:
-                    pass
-
+        for page_url in self._encounter_pages():
+            for doc in self._collect_docs(page_url):
+                self._initial_access_source(doc.web_link, 3)
                 if len(self.driver.find_elements(By.CLASS_NAME, 'content-container-details')) > 0:
                     try:
                         doc_text = self.driver.find_element(By.CLASS_NAME, 'content-container-details').find_element(
@@ -157,39 +101,11 @@ class EUPAY:
                 else:
                     doc_text = self.driver.find_element(By.TAG_NAME, 'article').find_element(By.CLASS_NAME,
                                                                                              'content').text
-
-                other_data = {'doc_type': doc_type,
-                              'tags': tags}
-
-                abstract = None
-
-                doc = SPP_document(None,
-                                   title_text,
-                                   abstract,
-                                   doc_text,
-                                   web_link,
-                                   None,
-                                   other_data,
-                                   parsed_date,
-                                   datetime.now())
+                doc.text = doc_text
+                doc.load_date = datetime.now()
+                doc.abstract = None
 
                 self.find_document(doc)
-
-                self.driver.close()
-                self.driver.switch_to.window(self.driver.window_handles[0])
-
-            try:
-                next_page = self.driver.find_element(By.XPATH, '//li[@class=\'next\']').find_element(By.TAG_NAME, 'a')
-                next_page.click()
-                self.logger.debug('Выполнен переход на новую страницу')
-                time.sleep(5)
-            except:
-                self.logger.debug('Не найдено переходов на след. страницу')
-                break
-
-        # ---
-        # ========================================
-        ...
 
     def _encounter_pages(self) -> str:
         _base = self.HOST
@@ -199,6 +115,91 @@ class EUPAY:
             url = _base + _params + str(page)
             page += 1
             yield url
+
+    def _initial_access_source(self, url: str, delay: int = 2):
+        self.driver.get(url)
+        self.logger.debug('Entered on web page ' + url)
+        time.sleep(delay)
+        self._agree_cookie_pass()
+
+    def _collect_docs(self, url: str) -> list[SPP_document]:
+        try:
+            self._initial_access_source(url)
+            self.wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, 'view-content')))
+        except Exception as e:
+            raise NoSuchElementException() from e
+
+        links = []
+        try:
+            articles = self.driver.find_elements(By.TAG_NAME, 'article')
+        except Exception as e:
+            raise NoSuchElementException('list is empty') from e
+        else:
+            for i, el in enumerate(articles):
+                web_link = None
+                try:
+                    try:
+                        _title = el.find_element(By.CLASS_NAME, 'kb-title')
+                        title_text = _title.text
+                    except:
+                        _title = el.find_element(By.CLASS_NAME, 'well').find_element(By.TAG_NAME, 'h2')
+                        title_text = _title.text
+
+                    web_link = _title.find_element(By.TAG_NAME, 'a').get_attribute('href')
+
+                    try:
+                        if len(el.find_elements(By.CLASS_NAME, 'kb-type')) > 0:
+                            doc_type = el.find_element(By.CLASS_NAME, 'kb-type').text
+                        elif len(el.find_elements(By.CLASS_NAME, 'news-type')) > 0:
+                            doc_type = el.find_element(By.CLASS_NAME, 'news-type').text
+                        elif len(el.find_elements(By.CLASS_NAME, 'label-alt')) > 0:
+                            doc_type = el.find_element(By.CLASS_NAME, 'label-alt').text
+                        else:
+                            doc_type = None
+                    except:
+                        doc_type = None
+                    try:
+                        if len(el.find_elements(By.CLASS_NAME, 'kb-intro')) > 0:
+                            date_text = el.find_element(By.CLASS_NAME, 'kb-intro').find_element(By.CLASS_NAME,
+                                                                                                     'date').text
+                        elif len(el.find_elements(By.CLASS_NAME, 'field--created')) > 0:
+                            date_text = el.find_element(By.CLASS_NAME, 'field--created').text
+                        else:
+                            date_text = datetime.strftime(date(2000, 1, 1), format='%Y-%m-%d')
+                        parsed_date = dateparser.parse(date_text)
+                    except:
+                        continue
+
+                    try:
+                        tags = el.find_element(By.CLASS_NAME, 'kb-tags').text
+                    except:
+                        tags = None
+
+                except Exception as e:
+                    self.logger.debug(NoSuchElementException(
+                        'Страница не открывается или ошибка получения обязательных полей. URL: '+str(web_link)))
+                    continue
+                else:
+                    _doc = SPP_document(None, title_text, None, None, web_link, None, {
+                        'doc_type': doc_type,
+                        'tags': tags,
+                    }, parsed_date, None)
+                    links.append(_doc)
+        return links
+
+    def _agree_cookie_pass(self):
+        """
+        Метод прожимает кнопку agree на модальном окне
+        """
+        cookie_agree_xpath = '//button[text() = \'Accept All Cookies\']'
+
+        try:
+            cookie_button = self.driver.find_element(By.XPATH, cookie_agree_xpath)
+            if WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable(cookie_button)):
+                cookie_button.click()
+                self.logger.debug(F"Parser pass cookie modal on page: {self.driver.current_url}")
+        except NoSuchElementException as e:
+            self.logger.debug(f'modal agree not found on page: {self.driver.current_url}')
 
     @staticmethod
     def _find_document_text_for_logger(self, doc: SPP_document):
