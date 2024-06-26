@@ -1,6 +1,8 @@
 from selenium import webdriver
+from selenium_stealth import stealth
+import undetected_chromedriver as uc
 from logging import config
-from eupay import EUPAY
+from eupay import EUPay
 import pickle
 import pandas
 
@@ -18,10 +20,31 @@ def driver():
     # Параметр для того, чтобы браузер не открывался.
     # options.add_argument('headless')
 
+    options.add_argument('start-maximized')
     options.add_argument('window-size=1920x1080')
     options.add_argument("disable-gpu")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
 
-    return webdriver.Chrome(options)
+    _driver = webdriver.Chrome(options)
+
+    stealth(_driver,
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.53 Safari/537.36',
+            languages=["en-US", "en"],
+            vendor="Google Inc.",
+            platform="Win32",
+            webgl_vendor="Intel Inc.",
+            renderer="Intel Iris OpenGL Engine",
+            fix_hairline=True,
+            run_on_insecure_origins=False,
+            )
+
+    return _driver
+
+
+def driver2():
+    __driver = uc.Chrome(headless=False, use_subprocess=True)
+    return __driver
 
 
 def to_dict(doc: SPP_document) -> dict:
@@ -37,20 +60,9 @@ def to_dict(doc: SPP_document) -> dict:
     }
 
 
-parser = EUPAY(driver(), max_count_documents=2, source_type='NATIVE')
-docs: list[SPP_document] = parser.content()
+if __name__ == '__main__':
+    parser = EUPay(driver2(), max_count_documents=5)
+    docs: list[SPP_document] = parser.content()
 
-try:
-    with open('backup/documents.backup.pkl', 'wb') as file:
-        pickle.dump(docs, file)
-except Exception as e:
-    print(e)
-
-try:
-    dataframe = pandas.DataFrame.from_records([to_dict(d) for d in docs])
-    dataframe.to_csv('out/eupay_documents.csv')
-except Exception as e:
-    print(e)
-
-print(*docs, sep='\n\r\n')
-print(len(docs))
+    print(*docs, sep='\n\r\n')
+    print(len(docs))
